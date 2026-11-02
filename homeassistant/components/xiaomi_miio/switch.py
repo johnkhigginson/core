@@ -21,7 +21,6 @@ from homeassistant.components.switch import (
     SwitchEntityDescription,
 )
 from homeassistant.const import (
-    ATTR_MODEL,
     ATTR_TEMPERATURE,
     CONF_DEVICE,
     CONF_HOST,
@@ -140,6 +139,7 @@ ATTR_LED = "led"
 ATTR_IONIZER = "ionizer"
 ATTR_ANION = "anion"
 ATTR_LOAD_POWER = "load_power"
+ATTR_MODEL = "model"
 ATTR_POWER = "power"
 ATTR_POWER_MODE = "power_mode"
 ATTR_POWER_PRICE = "power_price"

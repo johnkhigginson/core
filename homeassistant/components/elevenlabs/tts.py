@@ -20,7 +20,7 @@ from homeassistant.components.tts import (
     TtsAudioType,
     Voice,
 )
-from homeassistant.const import ATTR_MODEL, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
@@ -28,6 +28,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import ElevenLabsConfigEntry
 from .const import (
+    ATTR_MODEL,
     CONF_SIMILARITY,
     CONF_STABILITY,
     CONF_STYLE,
