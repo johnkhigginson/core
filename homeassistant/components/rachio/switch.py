@@ -270,6 +270,7 @@ class RachioRainDelay(RachioSwitch):
 class RachioZone(RachioSwitch):
     """Representation of one zone of sprinklers connected to the Rachio Iro."""
 
+    _attr_has_entity_name = True
     _attr_icon = "mdi:water"
 
     def __init__(self, person, controller, data, current_schedule) -> None:
@@ -399,6 +400,9 @@ class RachioZone(RachioSwitch):
 class RachioSchedule(RachioSwitch):
     """Representation of one fixed schedule on the Rachio Iro."""
 
+    _attr_has_entity_name = True
+    _attr_translation_key = "schedule"
+
     def __init__(self, person, controller, data, current_schedule) -> None:
         """Initialize a new Rachio Schedule."""
         self._schedule_id = data[KEY_ID]
@@ -410,7 +414,7 @@ class RachioSchedule(RachioSwitch):
         self._attr_unique_id = (
             f"{controller.controller_id}-schedule-{self._schedule_id}"
         )
-        self._attr_name = f"{data[KEY_NAME]} Schedule"
+        self._attr_translation_placeholders = {"schedule_name": data[KEY_NAME]}
         super().__init__(controller)
 
     @property

@@ -5,9 +5,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from homeassistant.components.rachio.const import DOMAIN
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.const import (
     ATTR_ENTITY_ID,
+    ATTR_FRIENDLY_NAME,
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
     STATE_OFF,
@@ -16,10 +18,12 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
 CONTROLLER_ID = "controller-id"
 ZONE_ID = "zone-id"
 ZONE_ENTITY_ID = "switch.test_controller_test_zone"
+SCHEDULE_ID = "schedule-id"
 
 MOCK_CONTROLLER = {
     "id": CONTROLLER_ID,
@@ -35,17 +39,124 @@ MOCK_CONTROLLER = {
             "enabled": True,
         }
     ],
-    "scheduleRules": [],
+    "scheduleRules": [
+        {
+            "id": SCHEDULE_ID,
+            "name": "Morning",
+            "totalDuration": 600,
+            "enabled": True,
+            "summary": "Morning run",
+        }
+    ],
     "flexScheduleRules": [],
 }
 
 pytestmark = [
     pytest.mark.parametrize("mock_rachio", [[MOCK_CONTROLLER]], indirect=True),
     pytest.mark.parametrize("init_integration", [Platform.SWITCH], indirect=True),
-    pytest.mark.usefixtures("init_integration"),
 ]
 
 
+@pytest.fixture
+def old_style_entries(entity_registry: er.EntityRegistry) -> None:
+    """Register switches as created before has_entity_name was used."""
+    entity_registry.async_get_or_create(
+        Platform.SWITCH,
+        DOMAIN,
+        f"{CONTROLLER_ID}-zone-{ZONE_ID}",
+        suggested_object_id="old_zone",
+        has_entity_name=False,
+        original_name="Test Zone",
+    )
+    entity_registry.async_get_or_create(
+        Platform.SWITCH,
+        DOMAIN,
+        f"{CONTROLLER_ID}-schedule-{SCHEDULE_ID}",
+        suggested_object_id="old_schedule",
+        has_entity_name=False,
+        original_name="Morning Schedule",
+    )
+
+
+@pytest.mark.usefixtures("init_integration")
+@pytest.mark.parametrize(
+    ("unique_id", "entity_id", "friendly_name"),
+    [
+        pytest.param(
+            f"{CONTROLLER_ID}-zone-{ZONE_ID}",
+            ZONE_ENTITY_ID,
+            "Test Controller Test Zone",
+            id="zone",
+        ),
+        pytest.param(
+            f"{CONTROLLER_ID}-schedule-{SCHEDULE_ID}",
+            "switch.test_controller_morning_schedule",
+            "Test Controller Morning schedule",
+            id="schedule",
+        ),
+        pytest.param(
+            f"{CONTROLLER_ID}-standby",
+            "switch.test_controller_standby",
+            "Test Controller Standby",
+            id="standby",
+        ),
+        pytest.param(
+            f"{CONTROLLER_ID}-delay",
+            "switch.test_controller_rain_delay",
+            "Test Controller Rain delay",
+            id="rain-delay",
+        ),
+    ],
+)
+async def test_entity_names_and_unique_ids(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    unique_id: str,
+    entity_id: str,
+    friendly_name: str,
+) -> None:
+    """Test unique IDs are unchanged and names are prefixed by the device name."""
+    assert entity_registry.async_get_entity_id(Platform.SWITCH, DOMAIN, unique_id) == (
+        entity_id
+    )
+    assert entity_registry.async_get(entity_id).has_entity_name
+    assert hass.states.get(entity_id).attributes[ATTR_FRIENDLY_NAME] == friendly_name
+
+
+@pytest.mark.usefixtures("old_style_entries", "init_integration")
+@pytest.mark.parametrize(
+    ("unique_id", "entity_id", "friendly_name"),
+    [
+        pytest.param(
+            f"{CONTROLLER_ID}-zone-{ZONE_ID}",
+            "switch.old_zone",
+            "Test Controller Test Zone",
+            id="zone",
+        ),
+        pytest.param(
+            f"{CONTROLLER_ID}-schedule-{SCHEDULE_ID}",
+            "switch.old_schedule",
+            "Test Controller Morning schedule",
+            id="schedule",
+        ),
+    ],
+)
+async def test_existing_entities_keep_entity_id(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    unique_id: str,
+    entity_id: str,
+    friendly_name: str,
+) -> None:
+    """Test entities registered without has_entity_name keep their entity ID."""
+    assert entity_registry.async_get_entity_id(Platform.SWITCH, DOMAIN, unique_id) == (
+        entity_id
+    )
+    assert entity_registry.async_get(entity_id).has_entity_name
+    assert hass.states.get(entity_id).attributes[ATTR_FRIENDLY_NAME] == friendly_name
+
+
+@pytest.mark.usefixtures("init_integration")
 @pytest.mark.parametrize(
     "success_status",
     [
@@ -88,6 +199,7 @@ async def test_zone_services_update_state(
     assert mock_rachio.device.stop_water.call_count == 2
 
 
+@pytest.mark.usefixtures("init_integration")
 @pytest.mark.parametrize(
     ("response", "side_effect", "expected_exception"),
     [
@@ -123,6 +235,7 @@ async def test_zone_start_failure_does_not_update_state(
     assert hass.states.is_state(ZONE_ENTITY_ID, STATE_OFF)
 
 
+@pytest.mark.usefixtures("init_integration")
 @pytest.mark.parametrize(
     ("response", "side_effect", "expected_exception"),
     [

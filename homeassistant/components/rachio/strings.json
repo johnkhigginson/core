@@ -43,6 +43,9 @@
       "rain_delay": {
         "name": "Rain delay"
       },
+      "schedule": {
+        "name": "{schedule_name} schedule"
+      },
       "standby": {
         "name": "Standby"
       }
