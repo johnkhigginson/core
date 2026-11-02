@@ -72,7 +72,7 @@
           "manual_run_mins": "Duration in minutes to run when activating a zone switch"
         },
         "data_description": {
-          "manual_run_mins": "How long a zone or valve runs when turned on without a duration. Acts as a failsafe if Home Assistant cannot turn it off."
+          "manual_run_mins": "How long a zone or valve runs when you turn it on from Home Assistant."
         }
       }
     }
