@@ -1,13 +1,14 @@
 """Adapter to wrap the rachiopy api for home assistant."""
 
 from abc import abstractmethod
+from datetime import datetime, timedelta
 from typing import Any, override
 
 from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DEFAULT_NAME,
@@ -23,19 +24,28 @@ from .const import (
     KEY_REPORTED_STATE,
     KEY_STATE,
 )
-from .coordinator import RachioUpdateCoordinator
+from .coordinator import (
+    RachioControllerData,
+    RachioControllerUpdateCoordinator,
+    RachioUpdateCoordinator,
+)
 from .device import RachioIro
 
+# The API can lag behind webhooks, so polls started this soon after a pushed
+# state are not trusted for that entity
+PUSH_HOLD_TIME = timedelta(minutes=1)
 
-class RachioDevice(Entity):
+
+class RachioDevice(CoordinatorEntity[RachioControllerUpdateCoordinator]):
     """Base class for rachio devices."""
 
-    _attr_should_poll = False
-
-    def __init__(self, controller: RachioIro) -> None:
+    def __init__(
+        self, controller: RachioIro, coordinator: RachioControllerUpdateCoordinator
+    ) -> None:
         """Initialize a Rachio device."""
-        super().__init__()
+        super().__init__(coordinator)
         self._controller = controller
+        self._last_pushed: datetime | None = None
         self._attr_device_info = DeviceInfo(
             identifiers={
                 (
@@ -54,6 +64,46 @@ class RachioDevice(Entity):
             manufacturer=DEFAULT_NAME,
             configuration_url="https://app.rach.io",
         )
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Return if the controller was in the last poll."""
+        return (
+            super().available
+            and self._controller.controller_id in self.coordinator.data
+        )
+
+    @property
+    def controller_data(self) -> RachioControllerData:
+        """Return the polled controller state."""
+        return self.coordinator.data[self._controller.controller_id]
+
+    def _mark_pushed(self) -> None:
+        """Note that the state was just set by a webhook or a command."""
+        self._last_pushed = dt_util.utcnow()
+
+    @abstractmethod
+    def _update_attr(self) -> None:
+        """Update the state from the polled controller state."""
+
+    @callback
+    @override
+    def _handle_coordinator_update(self) -> None:
+        """Apply polled state unless it may predate a pushed state."""
+        if self.available and (
+            self._last_pushed is None
+            or self.coordinator.poll_started >= self._last_pushed + PUSH_HOLD_TIME
+        ):
+            self._update_attr()
+        super()._handle_coordinator_update()
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Set the initial state from the polled controller state."""
+        await super().async_added_to_hass()
+        if self.available:
+            self._update_attr()
 
 
 class RachioHoseTimerEntity(CoordinatorEntity[RachioUpdateCoordinator]):

@@ -32,7 +32,11 @@ from .const import (
     LISTEN_EVENT_TYPES,
     WEBHOOK_CONST_ID,
 )
-from .coordinator import RachioScheduleUpdateCoordinator, RachioUpdateCoordinator
+from .coordinator import (
+    RachioControllerUpdateCoordinator,
+    RachioScheduleUpdateCoordinator,
+    RachioUpdateCoordinator,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +64,7 @@ class RachioPerson:
         self._id: str | None = None
         self._controllers: list[RachioIro] = []
         self._base_stations: list[RachioBaseStation] = []
+        self.controller_coordinator: RachioControllerUpdateCoordinator
 
     async def async_setup(self, hass: HomeAssistant) -> None:
         """Create rachio devices."""
@@ -121,6 +126,14 @@ class RachioPerson:
                     f"Failed to set up webhook for {rachio_iro}: {err}"
                 ) from err
             self._controllers.append(rachio_iro)
+
+        self.controller_coordinator = RachioControllerUpdateCoordinator(
+            hass,
+            rachio,
+            self.config_entry,
+            self._id,
+            [controller.controller_id for controller in self._controllers],
+        )
 
         base_count = len(base_stations)
         self._base_stations.extend(
@@ -248,11 +261,6 @@ class RachioIro:
     def controller_id(self) -> str:
         """Return the Rachio API controller ID."""
         return self._id
-
-    @property
-    def current_schedule(self) -> str:
-        """Return the schedule that the device is running right now."""
-        return self.rachio.device.current_schedule(self.controller_id)[1]
 
     @property
     def init_data(self) -> dict:

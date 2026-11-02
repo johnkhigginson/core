@@ -49,6 +49,9 @@
     }
   },
   "exceptions": {
+    "api_error": {
+      "message": "The Rachio API returned an error: {error}"
+    },
     "authentication_failed": {
       "message": "Authentication with the Rachio API failed"
     },

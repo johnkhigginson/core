@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 from contextlib import suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 from typing import Any, override
 
@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_utc_time
-from homeassistant.util.dt import as_timestamp, now, parse_datetime, utc_from_timestamp
+from homeassistant.util.dt import now, parse_datetime, utc_from_timestamp
 
 from .const import (
     CONF_MANUAL_RUN_MINS,
@@ -24,6 +24,7 @@ from .const import (
     KEY_DEVICE_ID,
     KEY_DURATION,
     KEY_ENABLED,
+    KEY_FLEX_SCHEDULES,
     KEY_ID,
     KEY_IMAGE_URL,
     KEY_NAME,
@@ -31,6 +32,7 @@ from .const import (
     KEY_RAIN_DELAY,
     KEY_RAIN_DELAY_END,
     KEY_SCHEDULE_ID,
+    KEY_SCHEDULES,
     KEY_SUBTYPE,
     KEY_SUMMARY,
     KEY_TYPE,
@@ -92,20 +94,18 @@ def _create_entities(
 ) -> list[Entity]:
     entities: list[Entity] = []
     person = config_entry.runtime_data
-    # Fetch the schedule once at startup
-    # in order to avoid every zone doing it
+    coordinator = person.controller_coordinator
     for controller in person.controllers:
-        entities.append(RachioStandbySwitch(controller))
-        entities.append(RachioRainDelay(controller))
+        entities.append(RachioStandbySwitch(controller, coordinator))
+        entities.append(RachioRainDelay(controller, coordinator))
         zones = controller.list_zones()
         schedules = controller.list_schedules()
         flex_schedules = controller.list_flex_schedules()
-        current_schedule = controller.current_schedule
         entities.extend(
-            RachioZone(person, controller, zone, current_schedule) for zone in zones
+            RachioZone(person, controller, coordinator, zone) for zone in zones
         )
         entities.extend(
-            RachioSchedule(person, controller, schedule, current_schedule)
+            RachioSchedule(person, controller, coordinator, schedule)
             for schedule in schedules + flex_schedules
         )
     entities.extend(
@@ -152,10 +152,19 @@ class RachioStandbySwitch(RachioSwitch):
         """Update the state using webhook data."""
         if args[0][0][KEY_SUBTYPE] == SUBTYPE_SLEEP_MODE_ON:
             self._attr_is_on = True
+            self._mark_pushed()
         elif args[0][0][KEY_SUBTYPE] == SUBTYPE_SLEEP_MODE_OFF:
             self._attr_is_on = False
+            self._mark_pushed()
 
         self.async_write_ha_state()
+
+    @callback
+    @override
+    def _update_attr(self) -> None:
+        """Update the state from the polled controller state."""
+        if KEY_ON in (device := self.controller_data.device):
+            self._attr_is_on = not device[KEY_ON]
 
     @override
     def turn_on(self, **kwargs: Any) -> None:
@@ -170,9 +179,7 @@ class RachioStandbySwitch(RachioSwitch):
     @override
     async def async_added_to_hass(self) -> None:
         """Subscribe to updates."""
-        if KEY_ON in self._controller.init_data:
-            self._attr_is_on = not self._controller.init_data[KEY_ON]
-
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -188,10 +195,10 @@ class RachioRainDelay(RachioSwitch):
     _attr_has_entity_name = True
     _attr_translation_key = "rain_delay"
 
-    def __init__(self, controller) -> None:
+    def __init__(self, controller, coordinator) -> None:
         """Set up a Rachio rain delay switch."""
         self._cancel_update: CALLBACK_TYPE | None = None
-        super().__init__(controller)
+        super().__init__(controller, coordinator)
 
     @property
     @override
@@ -203,22 +210,46 @@ class RachioRainDelay(RachioSwitch):
     @override
     def _async_handle_update(self, *args, **kwargs) -> None:
         """Update the state using webhook data."""
-        if self._cancel_update:
-            self._cancel_update()
-            self._cancel_update = None
-
         if args[0][0][KEY_SUBTYPE] == SUBTYPE_RAIN_DELAY_ON:
             endtime = parse_datetime(args[0][0][KEY_RAIN_DELAY_END])
             _LOGGER.debug("Rain delay expires at %s", endtime)
-            self._attr_is_on = True
             assert endtime is not None
-            self._cancel_update = async_track_point_in_utc_time(
-                self.hass, self._delay_expiration, endtime
-            )
+            self._set_delay_end(endtime)
+            self._mark_pushed()
         elif args[0][0][KEY_SUBTYPE] == SUBTYPE_RAIN_DELAY_OFF:
-            self._attr_is_on = False
+            self._set_delay_end(None)
+            self._mark_pushed()
 
         self.async_write_ha_state()
+
+    @callback
+    @override
+    def _update_attr(self) -> None:
+        """Update the state from the polled controller state."""
+        device = self.controller_data.device
+        self._set_delay_end(
+            utc_from_timestamp(device[KEY_RAIN_DELAY] / 1000)
+            if KEY_RAIN_DELAY in device
+            else None
+        )
+
+    @callback
+    def _set_delay_end(self, delay_end: datetime | None) -> None:
+        """Set the state and the timer that ends the rain delay."""
+        self._cancel_delay_timer()
+        self._attr_is_on = False
+        if delay_end is not None and delay_end > now():
+            self._attr_is_on = True
+            self._cancel_update = async_track_point_in_utc_time(
+                self.hass, self._delay_expiration, delay_end
+            )
+
+    @callback
+    def _cancel_delay_timer(self) -> None:
+        """Cancel the timer that ends the rain delay."""
+        if self._cancel_update:
+            self._cancel_update()
+            self._cancel_update = None
 
     @callback
     def _delay_expiration(self, *args) -> None:
@@ -242,22 +273,8 @@ class RachioRainDelay(RachioSwitch):
     @override
     async def async_added_to_hass(self) -> None:
         """Subscribe to updates."""
-        if KEY_RAIN_DELAY in self._controller.init_data:
-            self._attr_is_on = self._controller.init_data[
-                KEY_RAIN_DELAY
-            ] / 1000 > as_timestamp(now())
-
-        # If the controller was in a rain delay state during
-        # a reboot, this re-sets the timer
-        if self._attr_is_on is True:
-            delay_end = utc_from_timestamp(
-                self._controller.init_data[KEY_RAIN_DELAY] / 1000
-            )
-            _LOGGER.debug("Re-setting rain delay timer for %s", delay_end)
-            self._cancel_update = async_track_point_in_utc_time(
-                self.hass, self._delay_expiration, delay_end
-            )
-
+        await super().async_added_to_hass()
+        self.async_on_remove(self._cancel_delay_timer)
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -272,7 +289,7 @@ class RachioZone(RachioSwitch):
 
     _attr_icon = "mdi:water"
 
-    def __init__(self, person, controller, data, current_schedule) -> None:
+    def __init__(self, person, controller, coordinator, data) -> None:
         """Initialize a new Rachio Zone."""
         self.id = data[KEY_ID]
         self._attr_name = data[KEY_NAME]
@@ -284,9 +301,8 @@ class RachioZone(RachioSwitch):
         self._zone_type = data.get(KEY_CUSTOM_CROP, {}).get(KEY_NAME)
         self._slope_type = data.get(KEY_CUSTOM_SLOPE, {}).get(KEY_NAME)
         self._summary = ""
-        self._current_schedule = current_schedule
         self._attr_unique_id = f"{controller.controller_id}-zone-{self.id}"
-        super().__init__(controller)
+        super().__init__(controller, coordinator)
 
     @override
     def __str__(self):
@@ -343,6 +359,7 @@ class RachioZone(RachioSwitch):
         # Rachio does not send a zone-status webhook for changes made by the
         # same API client, so reflect a successful command immediately.
         self._attr_is_on = True
+        self._mark_pushed()
         self.schedule_update_ha_state()
         _LOGGER.debug(
             "Watering %s on %s for %s",
@@ -357,6 +374,7 @@ class RachioZone(RachioSwitch):
         self._controller.stop_watering()
         # Rachio does not deliver the stop webhook, so keep the state current.
         self._attr_is_on = False
+        self._mark_pushed()
         self.schedule_update_ha_state()
 
     def set_moisture_percent(self, percent) -> None:
@@ -375,20 +393,28 @@ class RachioZone(RachioSwitch):
 
         if args[0][KEY_SUBTYPE] == SUBTYPE_ZONE_STARTED:
             self._attr_is_on = True
+            self._mark_pushed()
         elif args[0][KEY_SUBTYPE] in [
             SUBTYPE_ZONE_STOPPED,
             SUBTYPE_ZONE_COMPLETED,
             SUBTYPE_ZONE_PAUSED,
         ]:
             self._attr_is_on = False
+            self._mark_pushed()
 
         self.async_write_ha_state()
+
+    @callback
+    @override
+    def _update_attr(self) -> None:
+        """Update the state from the polled controller state."""
+        current_schedule = self.controller_data.current_schedule
+        self._attr_is_on = self.zone_id == current_schedule.get(KEY_ZONE_ID)
 
     @override
     async def async_added_to_hass(self) -> None:
         """Subscribe to updates."""
-        self._attr_is_on = self.zone_id == self._current_schedule.get(KEY_ZONE_ID)
-
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, SIGNAL_RACHIO_ZONE_UPDATE, self._async_handle_update
@@ -399,19 +425,18 @@ class RachioZone(RachioSwitch):
 class RachioSchedule(RachioSwitch):
     """Representation of one fixed schedule on the Rachio Iro."""
 
-    def __init__(self, person, controller, data, current_schedule) -> None:
+    def __init__(self, person, controller, coordinator, data) -> None:
         """Initialize a new Rachio Schedule."""
         self._schedule_id = data[KEY_ID]
         self._duration = data[KEY_DURATION]
         self._schedule_enabled = data[KEY_ENABLED]
         self._summary = data[KEY_SUMMARY]
         self.type = data.get(KEY_TYPE, SCHEDULE_TYPE_FIXED)
-        self._current_schedule = current_schedule
         self._attr_unique_id = (
             f"{controller.controller_id}-schedule-{self._schedule_id}"
         )
         self._attr_name = f"{data[KEY_NAME]} Schedule"
-        super().__init__(controller)
+        super().__init__(controller, coordinator)
 
     @property
     @override
@@ -459,21 +484,38 @@ class RachioSchedule(RachioSwitch):
             if args[0][KEY_SCHEDULE_ID] == self._schedule_id:
                 if args[0][KEY_SUBTYPE] == SUBTYPE_SCHEDULE_STARTED:
                     self._attr_is_on = True
+                    self._mark_pushed()
                 elif args[0][KEY_SUBTYPE] in [
                     SUBTYPE_SCHEDULE_STOPPED,
                     SUBTYPE_SCHEDULE_COMPLETED,
                 ]:
                     self._attr_is_on = False
+                    self._mark_pushed()
 
         self.async_write_ha_state()
+
+    @callback
+    @override
+    def _update_attr(self) -> None:
+        """Update the state from the polled controller state."""
+        data = self.controller_data
+        self._attr_is_on = self._schedule_id == data.current_schedule.get(
+            KEY_SCHEDULE_ID
+        )
+        self._schedule_enabled = next(
+            (
+                schedule[KEY_ENABLED]
+                for schedule in data.device[KEY_SCHEDULES]
+                + data.device[KEY_FLEX_SCHEDULES]
+                if schedule[KEY_ID] == self._schedule_id
+            ),
+            self._schedule_enabled,
+        )
 
     @override
     async def async_added_to_hass(self) -> None:
         """Subscribe to updates."""
-        self._attr_is_on = self._schedule_id == self._current_schedule.get(
-            KEY_SCHEDULE_ID
-        )
-
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, SIGNAL_RACHIO_SCHEDULE_UPDATE, self._async_handle_update

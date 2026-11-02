@@ -30,7 +30,7 @@ from .const import (
     SIGNAL_RACHIO_RAIN_SENSOR_UPDATE,
     STATUS_ONLINE,
 )
-from .coordinator import RachioUpdateCoordinator
+from .coordinator import RachioControllerUpdateCoordinator, RachioUpdateCoordinator
 from .device import RachioConfigEntry, RachioIro
 from .entity import RachioDevice, RachioHoseTimerEntity
 from .webhooks import (
@@ -49,7 +49,7 @@ class RachioControllerBinarySensorDescription(BinarySensorEntityDescription):
     """Describe a Rachio controller binary sensor."""
 
     update_received: Callable[[str], bool | None]
-    is_on: Callable[[RachioIro], bool]
+    is_on: Callable[[dict[str, Any]], bool]
     signal_string: str
 
 
@@ -58,7 +58,7 @@ CONTROLLER_BINARY_SENSOR_TYPES: tuple[RachioControllerBinarySensorDescription, .
         key=KEY_ONLINE,
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
         signal_string=SIGNAL_RACHIO_CONTROLLER_UPDATE,
-        is_on=lambda controller: controller.init_data[KEY_STATUS] == STATUS_ONLINE,
+        is_on=lambda device: device[KEY_STATUS] == STATUS_ONLINE,
         update_received={
             SUBTYPE_ONLINE: True,
             SUBTYPE_COLD_REBOOT: True,
@@ -70,7 +70,7 @@ CONTROLLER_BINARY_SENSOR_TYPES: tuple[RachioControllerBinarySensorDescription, .
         translation_key="rain",
         device_class=BinarySensorDeviceClass.MOISTURE,
         signal_string=SIGNAL_RACHIO_RAIN_SENSOR_UPDATE,
-        is_on=lambda controller: controller.init_data[KEY_RAIN_SENSOR_TRIPPED],
+        is_on=lambda device: device[KEY_RAIN_SENSOR_TRIPPED],
         update_received={
             SUBTYPE_RAIN_SENSOR_DETECTION_ON: True,
             SUBTYPE_RAIN_SENSOR_DETECTION_OFF: False,
@@ -121,7 +121,9 @@ def _create_entities(
     entities: list[Entity] = []
     person = config_entry.runtime_data
     entities.extend(
-        RachioControllerBinarySensor(controller, description)
+        RachioControllerBinarySensor(
+            controller, person.controller_coordinator, description
+        )
         for controller in person.controllers
         for description in CONTROLLER_BINARY_SENSOR_TYPES
     )
@@ -144,10 +146,11 @@ class RachioControllerBinarySensor(RachioDevice, BinarySensorEntity):
     def __init__(
         self,
         controller: RachioIro,
+        coordinator: RachioControllerUpdateCoordinator,
         description: RachioControllerBinarySensorDescription,
     ) -> None:
         """Initialize a controller binary sensor."""
-        super().__init__(controller)
+        super().__init__(controller, coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{controller.controller_id}-{description.key}"
 
@@ -170,14 +173,20 @@ class RachioControllerBinarySensor(RachioDevice, BinarySensorEntity):
             )
         ) is not None:
             self._attr_is_on = updated_state
+            self._mark_pushed()
 
         self.async_write_ha_state()
+
+    @callback
+    @override
+    def _update_attr(self) -> None:
+        """Update the state from the polled controller state."""
+        self._attr_is_on = self.entity_description.is_on(self.controller_data.device)
 
     @override
     async def async_added_to_hass(self) -> None:
         """Subscribe to updates."""
-        self._attr_is_on = self.entity_description.is_on(self._controller)
-
+        await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,

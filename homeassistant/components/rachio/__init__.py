@@ -133,6 +133,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: RachioConfigEntry) -> No
         webhook_url,
     )
 
+    if person.controllers:
+        await person.controller_coordinator.async_config_entry_first_refresh()
     for base in person.base_stations:
         await base.status_coordinator.async_config_entry_first_refresh()
         await base.schedule_coordinator.async_config_entry_first_refresh()
