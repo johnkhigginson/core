@@ -12,7 +12,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_utc_time
-from homeassistant.util.dt import as_timestamp, now, parse_datetime, utc_from_timestamp
+from homeassistant.util.dt import (
+    as_timestamp,
+    now,
+    parse_datetime,
+    utc_from_timestamp,
+    utcnow,
+)
 
 from .const import (
     CONF_MANUAL_RUN_MINS,
@@ -46,7 +52,7 @@ from .const import (
     SLOPE_SLIGHT,
     SLOPE_STEEP,
 )
-from .device import RachioConfigEntry
+from .device import RachioConfigEntry, raise_for_status
 from .entity import RachioDevice, RachioHoseTimerEntity
 from .webhooks import (
     SUBTYPE_RAIN_DELAY_OFF,
@@ -75,6 +81,8 @@ ATTR_ZONE_SHADE = "Shade"
 ATTR_ZONE_SLOPE = "Slope"
 ATTR_ZONE_SUMMARY = "Summary"
 ATTR_ZONE_TYPE = "Type"
+
+RAIN_DELAY_SECONDS = 86400
 
 
 async def async_setup_entry(
@@ -160,12 +168,22 @@ class RachioStandbySwitch(RachioSwitch):
     @override
     def turn_on(self, **kwargs: Any) -> None:
         """Put the controller in standby mode."""
-        self._controller.rachio.device.turn_off(self._controller.controller_id)
+        raise_for_status(
+            self._controller.rachio.device.turn_off(self._controller.controller_id)
+        )
+        # Rachio does not send a status webhook for changes made by the same
+        # API client, so reflect a successful command immediately.
+        self._attr_is_on = True
+        self.schedule_update_ha_state()
 
     @override
     def turn_off(self, **kwargs: Any) -> None:
         """Resume controller functionality."""
-        self._controller.rachio.device.turn_on(self._controller.controller_id)
+        raise_for_status(
+            self._controller.rachio.device.turn_on(self._controller.controller_id)
+        )
+        self._attr_is_on = False
+        self.schedule_update_ha_state()
 
     @override
     async def async_added_to_hass(self) -> None:
@@ -228,16 +246,44 @@ class RachioRainDelay(RachioSwitch):
         self.async_write_ha_state()
 
     @override
-    def turn_on(self, **kwargs: Any) -> None:
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Activate a 24 hour rain delay on the controller."""
-        self._controller.rachio.device.rain_delay(self._controller.controller_id, 86400)
+        raise_for_status(
+            await self.hass.async_add_executor_job(
+                self._controller.rachio.device.rain_delay,
+                self._controller.controller_id,
+                RAIN_DELAY_SECONDS,
+            )
+        )
         _LOGGER.debug("Starting rain delay for 24 hours")
+        # Rachio does not send a rain delay webhook for changes made by the
+        # same API client, so track the expiry of the delay we requested.
+        if self._cancel_update:
+            self._cancel_update()
+        self._attr_is_on = True
+        self._cancel_update = async_track_point_in_utc_time(
+            self.hass,
+            self._delay_expiration,
+            utcnow() + timedelta(seconds=RAIN_DELAY_SECONDS),
+        )
+        self.async_write_ha_state()
 
     @override
-    def turn_off(self, **kwargs: Any) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Resume controller functionality."""
-        self._controller.rachio.device.rain_delay(self._controller.controller_id, 0)
+        raise_for_status(
+            await self.hass.async_add_executor_job(
+                self._controller.rachio.device.rain_delay,
+                self._controller.controller_id,
+                0,
+            )
+        )
         _LOGGER.debug("Canceling rain delay")
+        if self._cancel_update:
+            self._cancel_update()
+            self._cancel_update = None
+        self._attr_is_on = False
+        self.async_write_ha_state()
 
     @override
     async def async_added_to_hass(self) -> None:
@@ -438,7 +484,11 @@ class RachioSchedule(RachioSwitch):
     @override
     def turn_on(self, **kwargs: Any) -> None:
         """Start this schedule."""
-        self._controller.rachio.schedulerule.start(self._schedule_id)
+        raise_for_status(self._controller.rachio.schedulerule.start(self._schedule_id))
+        # Rachio does not send a schedule webhook for changes made by the same
+        # API client, so reflect a successful command immediately.
+        self._attr_is_on = True
+        self.schedule_update_ha_state()
         _LOGGER.debug(
             "Schedule %s started on %s",
             self.name,
@@ -449,6 +499,8 @@ class RachioSchedule(RachioSwitch):
     def turn_off(self, **kwargs: Any) -> None:
         """Stop watering all zones."""
         self._controller.stop_watering()
+        self._attr_is_on = False
+        self.schedule_update_ha_state()
 
     @callback
     @override
