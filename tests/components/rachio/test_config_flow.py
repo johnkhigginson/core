@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
+from requests.exceptions import ConnectTimeout
 
 from homeassistant import config_entries
 from homeassistant.components.rachio.const import (
@@ -164,6 +165,54 @@ async def test_form_cannot_connect(hass: HomeAssistant) -> None:
     assert result2["type"] is FlowResultType.CREATE_ENTRY
 
 
+@pytest.mark.parametrize(
+    ("side_effect", "error"),
+    [
+        pytest.param(ConnectTimeout, "cannot_connect", id="timeout"),
+        pytest.param(Exception, "unknown", id="unknown"),
+    ],
+)
+async def test_form_exceptions(
+    hass: HomeAssistant, side_effect: type[Exception], error: str
+) -> None:
+    """Test we handle exceptions raised by the API and can recover."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    rachio_mock = _mock_rachio_return_value()
+    rachio_mock.person.info.side_effect = side_effect
+    with patch(
+        "homeassistant.components.rachio.config_flow.Rachio", return_value=rachio_mock
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: "api_key"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": error}
+
+    rachio_mock = _mock_rachio_return_value(
+        get=({"status": 200}, {"username": "myusername"}),
+        info=({"status": 200}, {"id": "myid"}),
+    )
+    with (
+        patch(
+            "homeassistant.components.rachio.config_flow.Rachio",
+            return_value=rachio_mock,
+        ),
+        patch("homeassistant.components.rachio.async_setup_entry", return_value=None),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_API_KEY: "api_key"}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "myusername"
+    assert result["data"] == {CONF_API_KEY: "api_key"}
+
+
 async def test_form_homekit(hass: HomeAssistant) -> None:
     """Test that we abort from homekit if rachio is already setup."""
 
@@ -244,8 +293,12 @@ async def test_options_flow(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "init"
 
-    # This should be improved at a later stage to increase test coverage
-    hass.config_entries.options.async_abort(result["flow_id"])
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_MANUAL_RUN_MINS: 5}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {CONF_MANUAL_RUN_MINS: 5}
 
 
 async def test_reauth(hass: HomeAssistant) -> None:
