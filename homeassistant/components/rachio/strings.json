@@ -13,12 +13,18 @@
         "data": {
           "api_key": "[%key:common::config_flow::data::api_key%]"
         },
+        "data_description": {
+          "api_key": "The new API key from your Rachio account."
+        },
         "description": "The Rachio API key is no longer valid. You can get a new API key from {api_key_url}. Go to Settings, then select 'GET API KEY'.",
         "title": "[%key:common::config_flow::title::reauth%]"
       },
       "user": {
         "data": {
           "api_key": "[%key:common::config_flow::data::api_key%]"
+        },
+        "data_description": {
+          "api_key": "The API key from your Rachio account."
         },
         "description": "You will need the API key from {api_key_url}. Go to Settings, then select 'GET API KEY'.",
         "title": "Connect to your Rachio device"
@@ -64,6 +70,9 @@
       "init": {
         "data": {
           "manual_run_mins": "Duration in minutes to run when activating a zone switch"
+        },
+        "data_description": {
+          "manual_run_mins": "How long a zone or valve runs when turned on without a duration. Acts as a failsafe if Home Assistant cannot turn it off."
         }
       }
     }
