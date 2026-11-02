@@ -715,7 +715,6 @@ INTEGRATIONS_WITHOUT_QUALITY_SCALE_FILE = [
     "qvr_pro",
     "qwikswitch",
     "rabbitair",
-    "rachio",
     "radarr",
     "radiotherm",
     "rainforest_eagle",
