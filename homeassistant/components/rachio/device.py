@@ -7,7 +7,6 @@ from typing import Any, override
 from rachiopy import Rachio
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
@@ -115,7 +114,12 @@ class RachioPerson:
                 continue
 
             rachio_iro = RachioIro(hass, rachio, controller, webhooks)
-            rachio_iro.setup()
+            try:
+                rachio_iro.setup()
+            except HomeAssistantError as err:
+                raise ConfigEntryNotReady(
+                    f"Failed to set up webhook for {rachio_iro}: {err}"
+                ) from err
             self._controllers.append(rachio_iro)
 
         base_count = len(base_stations)
@@ -176,41 +180,25 @@ class RachioIro:
         self._flex_schedules = data[KEY_FLEX_SCHEDULES]
         self._init_data = data
         self._webhooks: list[dict[str, Any]] = webhooks
+        self._webhook_id: str | None = None
         _LOGGER.debug('%s has ID "%s"', self, self.controller_id)
 
     def setup(self) -> None:
         """Rachio Iro setup for webhooks."""
         # Listen for all updates
-        self._init_webhooks()
+        self.init_webhooks()
 
-    def _init_webhooks(self) -> None:
+    def init_webhooks(self) -> None:
         """Start getting updates from the Rachio API."""
-        current_webhook_id = None
-
         # First delete any old webhooks that may have stuck around
-        def _deinit_webhooks(_) -> None:
-            """Stop getting updates from the Rachio API."""
-            if not self._webhooks:
-                # We fetched webhooks when we created the device,
-                # however if we call _init_webhooks
-                # again we need to fetch again
-                self._webhooks = self.rachio.notification.get_device_webhook(
-                    self.controller_id
-                )[1]
-            for webhook in self._webhooks:
-                if (
-                    webhook[KEY_EXTERNAL_ID].startswith(WEBHOOK_CONST_ID)
-                    or webhook[KEY_ID] == current_webhook_id
-                ):
-                    self.rachio.notification.delete(webhook[KEY_ID])
-            self._webhooks = []
-
-        _deinit_webhooks(None)
+        self.deinit_webhooks()
 
         # Choose which events to listen for and get their IDs
+        event_type_response = self.rachio.notification.get_webhook_event_type()
+        raise_for_status(event_type_response)
         event_types = [
             {"id": event_type[KEY_ID]}
-            for event_type in self.rachio.notification.get_webhook_event_type()[1]
+            for event_type in event_type_response[1]
             if event_type[KEY_NAME] in LISTEN_EVENT_TYPES
         ]
 
@@ -220,9 +208,36 @@ class RachioIro:
         new_webhook = self.rachio.notification.add(
             self.controller_id, auth, url, event_types
         )
-        # Save ID for deletion at shutdown
-        current_webhook_id = new_webhook[1][KEY_ID]
-        self.hass.bus.listen(EVENT_HOMEASSISTANT_STOP, _deinit_webhooks)
+        raise_for_status(new_webhook)
+        self._webhook_id = new_webhook[1][KEY_ID]
+
+    def deinit_webhooks(self) -> None:
+        """Stop getting updates from the Rachio API."""
+        if not self._webhooks:
+            # We fetched webhooks when we created the device,
+            # however if we call this again we need to fetch again
+            response = self.rachio.notification.get_device_webhook(self.controller_id)
+            raise_for_status(response)
+            if not isinstance(response[1], list):
+                raise HomeAssistantError(f"API Error: {response}")
+            self._webhooks = response[1]
+        for webhook in self._webhooks:
+            if (
+                webhook[KEY_EXTERNAL_ID].startswith(WEBHOOK_CONST_ID)
+                or webhook[KEY_ID] == self._webhook_id
+            ):
+                self.rachio.notification.delete(webhook[KEY_ID])
+        self._webhooks = []
+
+    def webhook_registered(self) -> bool | None:
+        """Return if our webhook is registered, or None if the API gave no answer."""
+        status, webhooks = self.rachio.notification.get_device_webhook(
+            self.controller_id
+        )
+        if int(status[KEY_STATUS]) != HTTPStatus.OK or not isinstance(webhooks, list):
+            _LOGGER.debug("Could not list webhooks for %s: %s", self, webhooks)
+            return None
+        return any(webhook[KEY_ID] == self._webhook_id for webhook in webhooks)
 
     @override
     def __str__(self) -> str:

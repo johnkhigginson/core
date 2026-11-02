@@ -1,5 +1,7 @@
 """Constants for rachio."""
 
+from datetime import timedelta
+
 DEFAULT_NAME = "Rachio"
 
 DOMAIN = "rachio"
@@ -108,3 +110,5 @@ LISTEN_EVENT_TYPES = [
     "SCHEDULE_STATUS_EVENT",
 ]
 WEBHOOK_CONST_ID = "homeassistant.rachio:"
+# One API call per controller per check, 48 a day of the 1700 allowed per API key
+WEBHOOK_CHECK_INTERVAL = timedelta(minutes=30)
